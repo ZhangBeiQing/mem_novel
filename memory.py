@@ -13,7 +13,7 @@ import time
 import uuid
 import logging
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import re
@@ -28,17 +28,13 @@ logger = logging.getLogger(__name__)
 # JSON修复功能配置
 try:
     from json_repair import repair_json
-
     HAS_JSONREPAIR = True
     logger.info("✓ jsonrepair库已加载，JSON修复功能已启用")
 except ImportError:
     HAS_JSONREPAIR = False
     logger.warning("⚠ jsonrepair库未安装，将使用基础修复策略")
-
-
     def repair_json(text):
         return text
-
 
 class TaskType(Enum):
     """任务类型枚举"""
@@ -46,10 +42,9 @@ class TaskType(Enum):
     CHARACTER_ANALYSIS = "character_analysis"
     PLOT_SPECULATION = "plot_speculation"
 
-
 class MemOSLLMClient:
     """对话客户端 - 使用MemOS让AI调用变得简单可靠"""
-
+  
     def __init__(self, api_key: str, api_base: str = "https://api.openai.com/v1", model: str = "gpt-4o"):
         """初始化MemOS LLM客户端"""
         try:
@@ -129,17 +124,25 @@ class Prompt:
         ]
 
     @staticmethod
-    def update_character_prompt(character_name: str, unfinished_events: list, paragraph: str):
-        """人物更新提示词"""
+    def update_characters_batch_prompt(characters_data: dict, paragraph: str):
+        """批量人物更新提示词"""
+        # 构建人物信息字符串
+        characters_info = []
+        for name, memcube in characters_data.items():
+            unfinished_events = [event for event in memcube.get("events", []) if not event.get("if_completed", False)]
+            characters_info.append(f"人物姓名：{name}")
+            characters_info.append(f"当前未完结事件：{json.dumps(unfinished_events, ensure_ascii=False, indent=2)}")
+            characters_info.append("---")
+        
         return [
             {
                 "role": "system",
                 "content": (
-                    "你是小说人物建模专家，将分析某人物的未完成事件与最新小说片段。\n"
-                    "你的任务是更新以下字段：\n\n"
+                    "你是小说人物建模专家，将分析多个人物的未完成事件与最新小说片段。\n"
+                    "你的任务是为每个人物更新以下字段：\n"
                     "- events：事件列表，每个事件包含以下子字段：\n"
                     "  * event_id：唯一标识符（如 \"event_001\"）\n"
-                    "  * action：该人物在此事件中的具体行为/动作（如 \"寻找\"、\"决斗\"、\"逃跑\"）\n"
+                    "  * action：人物在此事件中的具体行为/动作（如 \"寻找\"、\"决斗\"、\"逃跑\"）\n"
                     "  * event：事件的整体描述，可能涉及多个人物（如 \"张三与李四在酒楼发生冲突\"）\n"
                     "  * motivation：该人物行动的动机/原因\n"
                     "  * impact：事件对该人物的影响\n"
@@ -160,29 +163,41 @@ class Prompt:
                     "1. 请认真判断现有未完成事件是否已经在新片段中结束。\n"
                     "2. 如果某事件已有结局或结果，请务必将其 `if_completed` 字段标记为 true。\n"
                     "3. 如果小说片段中出现与该人物相关的新事件，请添加新的事件条目。\n"
-                    "最终请输出以下 JSON 结构：\n"
+                    "4. 只更新在本章节中有出现或提及的人物，没有出现的人物可以返回空的更新。\n"
+                    "最终请输出以下 JSON 结构（包含所有人物的更新信息）：\n"
                     "{\n"
-                    "  \"events\": [...],\n"
-                    "  \"utterances\": [...],\n"
-                    "  \"speech_style\": \"...\",\n"
-                    "  \"personality_traits\": [...],\n"
-                    "  \"emotion_state\": \"...\",\n"
-                    "  \"relations\": [...]\n"
+                    "  \"人物名1\": {\n"
+                    "    \"events\": [...],\n"
+                    "    \"utterances\": [...],\n"
+                    "    \"speech_style\": \"...\",\n"
+                    "    \"personality_traits\": [...],\n"
+                    "    \"emotion_state\": \"...\",\n"
+                    "    \"relations\": [...]\n"
+                    "  },\n"
+                    "  \"人物名2\": {\n"
+                    "    \"events\": [...],\n"
+                    "    \"utterances\": [...],\n"
+                    "    \"speech_style\": \"...\",\n"
+                    "    \"personality_traits\": [...],\n"
+                    "    \"emotion_state\": \"...\",\n"
+                    "    \"relations\": [...]\n"
+                    "  }\n"
                     "}\n\n"
                     "请注意：\n"
                     "1. 所有字段名必须使用双引号包裹（JSON 标准格式）。\n"
                     "2. 不要添加注释符号、额外说明或 markdown 符号。\n"
                     "3. 仅返回完整 JSON 对象，不能是数组或其他格式。\n"
-                    "4. 如没有内容可填，请使用空数组 [] 或空字符串 \"\"。\n"
+                    "4. 如某个人物没有内容可填，请使用空数组 [] 或空字符串 \"\"。\n"
+                    "5. 如某个人物在本章节中完全没有出现，可以省略该人物或返回空的更新信息。\n"
                 )
             },
             {
                 "role": "user",
                 "content": (
-                    f"人物姓名：{character_name}\n"
-                    f"当前未完结事件如下（JSON）：\n{json.dumps(unfinished_events, ensure_ascii=False, indent=2)}\n\n"
+                    f"需要更新的人物信息：\n\n"
+                    f"{chr(10).join(characters_info)}\n\n"
                     f"小说片段如下：\n{paragraph}\n\n"
-                    "请按上述格式返回该人物的更新信息。"
+                    "请按上述格式返回所有人物的更新信息。"
                 )
             }
         ]
@@ -389,62 +404,59 @@ class NovelMemoryBuilder:
                 result.append(item)
         return result
 
-    def update_memcube_for_character(self, name: str, memcube: dict, content: str, chapter_id: str):
-        """更新单个人物的记忆立方体"""
+    def update_memcubes_batch(self, characters_data: dict, content: str, chapter_id: str):
+        """批量更新多个人物的记忆立方体"""
         try:
-            # 获取未完成事件
-            unfinished_events = self.get_unfinished_events(memcube)
-
-            # 构建更新提示
-            update_prompt = Prompt.update_character_prompt(name, unfinished_events, content)
-
+            # 构建批量更新提示
+            update_prompt = Prompt.update_characters_batch_prompt(characters_data, content)
+            
             # 调用API
             result = self.api_client.call_api(update_prompt, TaskType.CHARACTER_ANALYSIS, timeout=1800)
-
+            
             if result["status"] != "success":
-                return name, None, result.get("error", "API调用失败")
-
+                return None, result.get("error", "API调用失败")
+            
             # 解析结果
             try:
                 content_str = result.get("content", "").strip()
                 # 清理可能的markdown标记
                 content_str = content_str.strip("```json").strip("```").strip()
                 updated_data = json.loads(content_str)
-                return name, updated_data, None
+                return updated_data, None
             except json.JSONDecodeError as e:
                 # 尝试修复JSON
                 if HAS_JSONREPAIR:
                     try:
                         repaired = repair_json(content_str)
                         updated_data = json.loads(repaired)
-                        return name, updated_data, None
+                        return updated_data, None
                     except:
                         pass
-                return name, None, f"JSON解析失败: {e}"
-
+                return None, f"JSON解析失败: {e}"
+                
         except Exception as e:
-            logger.error(f"更新人物{name}时发生错误: {e}")
-            return name, None, str(e)
+            logger.error(f"批量更新人物时发生错误: {e}")
+            return None, str(e)
 
     def process_chapters(self, chapter_folder: str = "chapters"):
         """处理所有章节"""
         # 按章节顺序处理
         chapter_files = sorted(
-            [os.path.join(chapter_folder, f) for f in os.listdir(chapter_folder)
+            [os.path.join(chapter_folder, f) for f in os.listdir(chapter_folder) 
              if f.startswith("chapter") and f.endswith(".txt")],
             key=lambda x: int(re.search(r'chapter(\d+)', x).group(1))
         )
 
         for chapter_file in chapter_files:
             chapter_id = os.path.basename(chapter_file).replace(".txt", "")
-            logger.info(f"\n正在处理：{chapter_id}")
-
+            logger.info(f"\n 正在处理：{chapter_id}")
+      
             with open(chapter_file, "r", encoding="utf-8") as f:
                 content = f.read()
-
+                
             # 执行人物识别和初始化
             self._process_character_identification(content, chapter_id)
-
+            
             # 更新所有人物状态
             self._update_all_characters(content, chapter_id)
 
@@ -463,7 +475,7 @@ class NovelMemoryBuilder:
         for item in extracted:
             std_name = item["name"]
             aliases = item.get("aliases", [])
-
+        
             # 初始化或更新 MemCube
             if std_name not in self.memcubes:
                 logger.info(f"新人物识别：{std_name}")
@@ -479,65 +491,78 @@ class NovelMemoryBuilder:
                 self.alias_to_name[alias] = std_name
 
     def _update_all_characters(self, content: str, chapter_id: str):
-        """并行更新所有人物状态"""
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {
-                executor.submit(self.update_memcube_for_character, name, memcube, content, chapter_id): name
-                for name, memcube in self.memcubes.items()
-            }
+        """批量更新所有人物状态"""
+        if not self.memcubes:
+            logger.info("没有人物需要更新")
+            return
+            
+        try:
+            # 批量调用API更新所有人物
+            updated_data, error = self.update_memcubes_batch(self.memcubes, content, chapter_id)
+            
+            if error:
+                logger.warning(f"⚠️ 批量更新失败 in {chapter_id} -> {error}")
+                return
+                
+            if not updated_data:
+                logger.warning(f"⚠️ 批量更新返回空结果 in {chapter_id}")
+                return
 
-            for future in as_completed(futures):
-                name = futures[future]
-                try:
-                    name, updated, error = future.result()
-                    if error or not updated:
-                        logger.warning(f"更新失败：{name} in {chapter_id} -> {error}")
-                        continue
+            # 处理批量更新结果
+            for name, updated in updated_data.items():
+                if name not in self.memcubes:
+                    logger.warning(f"⚠️ 返回了未知人物：{name}")
+                    continue
+                    
+                if not updated:
+                    logger.info(f"📝 {name} 在本章节中无更新")
+                    continue
 
-                    # 智能合并更新结果
-                    memcube = self.memcubes[name]
-                    memcube["events"] = self.merge_events(memcube["events"], updated.get("events", []))
-                    memcube["utterances"].extend(updated.get("utterances", []))
-                    if updated.get("speech_style"):
-                        memcube["speech_style"] = updated["speech_style"]
-                    memcube["personality_traits"] = self.merge_unique_list(
-                        memcube["personality_traits"], updated.get("personality_traits", [])
-                    )
-                    if updated.get("emotion_state"):
-                        memcube["emotion_state"] = updated["emotion_state"]
-                    memcube["relations"].extend(updated.get("relations", []))
+                # 智能合并更新结果
+                memcube = self.memcubes[name]
+                memcube["events"] = self.merge_events(memcube["events"], updated.get("events", []))
+                memcube["utterances"].extend(updated.get("utterances", []))
+                if updated.get("speech_style"):
+                    memcube["speech_style"] = updated["speech_style"]
+                memcube["personality_traits"] = self.merge_unique_list(
+                    memcube["personality_traits"], updated.get("personality_traits", [])
+                )
+                if updated.get("emotion_state"):
+                    memcube["emotion_state"] = updated["emotion_state"]
+                memcube["relations"].extend(updated.get("relations", []))
+                
+                logger.info(f"✅ 成功更新：{name}")
 
-                except Exception as e:
-                    logger.error(f"并行执行异常：{name} -> {e}")
+        except Exception as e:
+            logger.error(f"⚠️ 批量更新异常 in {chapter_id} -> {e}")
 
     def save_memcubes(self, filename: str = "memcubes.json"):
         """保存记忆立方体"""
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(self.memcubes, f, ensure_ascii=False, indent=2)
-        logger.info(f"记忆立方体已保存到 {filename}")
+        logger.info(f"✅ 记忆立方体已保存到 {filename}")
 
     def load_memcubes(self, filename: str = "memcubes.json"):
         """加载记忆立方体"""
         try:
             with open(filename, "r", encoding="utf-8") as f:
                 self.memcubes = json.load(f)
-            logger.info(f"记忆立方体已从 {filename} 加载")
+            logger.info(f"✅ 记忆立方体已从 {filename} 加载")
         except FileNotFoundError:
-            logger.warning(f"文件 {filename} 不存在")
-
+            logger.warning(f"⚠️ 文件 {filename} 不存在")
 
 class MemoryConverter:
     """记忆格式转换器"""
-
+    
     @staticmethod
     def create_memory_node(content: str, entities: list, key: str, memory_type: str = "fact") -> dict:
         """创建标准化的Memory节点"""
         node_id = str(uuid.uuid4())
         now = datetime.now().isoformat()
-
+      
         # 模拟embedding（实际应用中应使用真实的embedding服务）
         embedding = [0.1] * 768  # 示例维度
-
+      
         return {
             "id": node_id,
             "memory": content,
@@ -623,33 +648,32 @@ class MemoryConverter:
                 "edges": edges
             }, f, ensure_ascii=False, indent=2)
 
-        logger.info(f"完成转换，共生成 {len(nodes)} 个 memory 节点，{len(edges)} 条边")
-        logger.info(f"输出文件: {output_file}")
-
+        logger.info(f"✅ 完成转换，共生成 {len(nodes)} 个 memory 节点，{len(edges)} 条边")
+        logger.info(f"📁 输出文件: {output_file}")
 
 class WuxiaTextGame:
     """武侠文字游戏核心类"""
-
+    
     def __init__(self, mos_config):
         """初始化游戏"""
         try:
             from memos.mem_os.main import MOS
-
+            
             self.world_memory = MOS(mos_config)  # 世界记忆系统
-            self.character_cubes = {}  # 每个NPC的MemCube
-            self.timeline_memories = []  # 时间线记忆列表
-
+            self.character_cubes = {}            # 每个NPC的MemCube
+            self.timeline_memories = []          # 时间线记忆列表
+            
             # 创建游戏主用户
             self.world_memory.create_user("game_master")
-            logger.info("武侠文字游戏初始化完成")
+            logger.info("✅ 武侠文字游戏初始化完成")
         except ImportError as e:
             logger.error(f"MemOS导入失败: {e}")
             raise
-
+      
     def start_adventure(self, player_choice):
         """开始冒险"""
         return f"欢迎来到{player_choice.get('location', '江湖')}..."
-
+  
     def process_action(self, player_input):
         """处理玩家的自然语言输入"""
         try:
